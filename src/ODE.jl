@@ -154,6 +154,9 @@ function ode_ms(F, x0, tspan, order::Integer)
     h = diff(tspan)
     x = Array(typeof(x0), length(tspan))
     x[1] = x0
+    dof = length(x0)
+    dot = length(tspan)
+    Ty = typeof(x0)
 
     if 1 <= order <= 4
         b = ms_coefficients4
@@ -173,6 +176,8 @@ function ode_ms(F, x0, tspan, order::Integer)
 
     # TODO: use a better data structure here (should be an order-element circ buffer)
     xdot = similar(x)
+    stiffness_f = Array(Ty, dot)
+    allocate!(stiffness_f, x0, dof)
     for i = 1:length(tspan)-1
         # Need to run the first several steps at reduced order
         steporder = min(i, order)
@@ -182,8 +187,10 @@ function ode_ms(F, x0, tspan, order::Integer)
         for j = 1:steporder
             x[i+1] += h[i]*b[steporder, j]*xdot[i-(steporder-1) + (j-1)]
         end
+        stiffness_f[i] = (F(zero(1), x[i+1]) - F(zero(1), x[i])) / h[i]
     end
-    return vcat(tspan), x
+        stiffness_f[end] = zeros(dof)
+    return vcat(tspan), x, stiffness_f
 end
 
 # Use order 4 by default
@@ -253,6 +260,9 @@ function ode23s(F, y0, tspan; reltol = 1.0e-5, abstol = 1.0e-8,
     t = tspan[1]
 
     tfinal = tspan[end]
+    #dot = length(tspan)
+    #dof = length(y0)
+    #Ty = typeof(y0)
 
     h = initstep
     if h == 0.
@@ -269,6 +279,8 @@ function ode23s(F, y0, tspan; reltol = 1.0e-5, abstol = 1.0e-8,
     tout[1] = t         # first output time
     yout = Array(typeof(y0), 1)
     yout[1] = deepcopy(y)         # first output solution
+    #stiffness_f = Array(Ty, dot)
+    #allocate!(stiffness_f, y0, dof)
 
 
     J = jac(t,y)    # get Jacobian of F wrt y
@@ -316,12 +328,14 @@ function ode23s(F, y0, tspan; reltol = 1.0e-5, abstol = 1.0e-8,
                     # use interpolation formula to get solutions at t=toi
                     push!(tout, toi)
                     push!(yout, y + h*( k1*s*(1-s)/(1-2*d) + k2*s*(s-2*d)/(1-2*d)))
+                    # stiffness_f[i] = diff(yout[toi:toi+1])[1]
                 end
             end
             if (points==:all) && (tout[end]!=t+h)
                 # add the intermediate points
                 push!(tout, t + h)
                 push!(yout, ynew)
+                # stiffness_f[end-1] = diff(yout[end-1:end])[1]
             end
 
             # update solution
@@ -337,7 +351,7 @@ function ode23s(F, y0, tspan; reltol = 1.0e-5, abstol = 1.0e-8,
         h = tdir*min( maxstep, abs(h)*0.8*(delta/err)^(1/3) )
     end
 
-    return tout, yout
+    return tout, yout#, stiffness_f
 end
 
 

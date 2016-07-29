@@ -157,19 +157,20 @@ const bt_feh78 = TableauRKExplicit(:feh78, (7,8), Rational{Int64},
 ################################
 
 # TODO: iterator method
-ode1(fn, y0, tspan) = oderk_fixed(fn, y0, tspan, bt_feuler)
-ode2_midpoint(fn, y0, tspan) = oderk_fixed(fn, y0, tspan, bt_midpoint)
-ode2_heun(fn, y0, tspan) = oderk_fixed(fn, y0, tspan, bt_heun)
-ode4(fn, y0, tspan) = oderk_fixed(fn, y0, tspan, bt_rk4)
+ode1(fn, y0, tspan; kwargs...) = oderk_fixed(fn, y0, tspan, bt_feuler; kwargs...)
+ode2_midpoint(fn, y0, tspan; kwargs...) = oderk_fixed(fn, y0, tspan, bt_midpoint; kwargs...)
+ode2_heun(fn, y0, tspan; kwargs...) = oderk_fixed(fn, y0, tspan, bt_heun; kwargs...)
+ode4(fn, y0, tspan; kwargs...) = oderk_fixed(fn, y0, tspan, bt_rk4; kwargs...)
 
-function oderk_fixed(fn, y0, tspan, btab::TableauRKExplicit)
+function oderk_fixed(fn, y0, tspan, btab::TableauRKExplicit; kwords...)
     # Non-arrays y0 treat as scalar
     fn_(t, y) = [fn(t, y[1])]
     t,y = oderk_fixed(fn_, [y0], tspan, btab)
     return t, vcat_nosplat(y)
 end
 function oderk_fixed{N,S}(fn, y0::AbstractVector, tspan,
-                          btab_::TableauRKExplicit{N,S})
+                          btab_::TableauRKExplicit{N,S},
+                          stiffness=:implicit)
     # TODO: instead of AbstractVector use a Holy-trait
 
     # Needed interface:
@@ -189,6 +190,8 @@ function oderk_fixed{N,S}(fn, y0::AbstractVector, tspan,
     ks = Array(Ty, S)
     # allocate!(ks, y0, dof) # no need to allocate as fn is not in-place
     ytmp = similar(y0, Eyf, dof)
+    stiffness_f = Array(Ty, length(tspan))
+    allocate!(stiffness_f, y0, dof)
     for i=1:length(tspan)-1
         dt = tspan[i+1]-tspan[i]
         ys[i+1][:] = ys[i]
@@ -198,8 +201,14 @@ function oderk_fixed{N,S}(fn, y0::AbstractVector, tspan,
                 ys[i+1][d] += dt * btab.b[s]*ks[s][d]
             end
         end
+        stiffness_f[i] = (fn(zero(1), ys[i+1]) - fn(zero(1), ys[i])) / dt
     end
-    return tspan, ys
+    stiffness_f[end] = zeros(dof)
+    #if stiffness==:show
+      return tspan, ys, stiffness_f
+    #else
+      #return tspan, ys
+    #end
 end
 
 ##############################
@@ -289,6 +298,9 @@ function oderk_adapt{N,S}(fn, y0::AbstractVector, tspan, btab_::TableauRKExplici
     islaststep = abs(t+dt-tend)<=eps(tend) ? true : false
     timeout = 0 # for step-control
     iter = 2 # the index into tspan and ys
+    stiffness_f = Array(Ty, nsteps_fixed)
+    allocate!(stiffness_f, y0, dof)
+    dt_f = Array(Float64, 2)
     while true
         # do one step (assumes ks[1]==f0)
         rk_embedded_step!(ytrial, yerr, ks, ytmp, y, fn, t, dt, dof, btab)
@@ -309,6 +321,7 @@ function oderk_adapt{N,S}(fn, y0::AbstractVector, tspan, btab_::TableauRKExplici
                 # interpolate onto given output points
                 while iter-1<nsteps_fixed && (tdir*tspan[iter]<tdir*(t+dt) || islaststep) # output at all new times which are < t+dt
                     hermite_interp!(ys[iter], tspan[iter], t, dt, y, ytrial, f0, f1) # TODO: 3rd order only!
+                    index_or_push!(stiffness_f, iter-1, (fn(zero(1), ys[iter])-fn(zero(1), ys[iter-1])) / diff(tspan[end-1:end])[1] )
                     iter += 1
                 end
             else
@@ -317,12 +330,14 @@ function oderk_adapt{N,S}(fn, y0::AbstractVector, tspan, btab_::TableauRKExplici
                     yout = hermite_interp(tspan_fixed[iter_fixed], t, dt, y, ytrial, f0, f1)
                     index_or_push!(ys, iter, yout) # TODO: 3rd order only!
                     push!(tspan, tspan_fixed[iter_fixed])
+                    index_or_push!(stiffness_f, iter-1, (fn(zero(1), ys[iter])-fn(zero(1), ys[iter-1])) / diff(tspan[end-1:end])[1] )
                     iter_fixed += 1
                     iter += 1
                 end
                 # but also output every step taken
                 index_or_push!(ys, iter, deepcopy(ytrial))
                 push!(tspan, t+dt)
+                index_or_push!(stiffness_f, iter-1, (fn(zero(1), ys[iter])-fn(zero(1), ys[iter-1])) / diff(tspan[end-1:end])[1] )
                 iter += 1
             end
             ks[1] = f1 # load ks[1]==f0 for next step
@@ -352,7 +367,8 @@ function oderk_adapt{N,S}(fn, y0::AbstractVector, tspan, btab_::TableauRKExplici
             timeout = timeout_const
         end
     end
-    return tspan, ys
+    stiffness_f[end] = zeros(dof)
+    return tspan, ys, stiffness_f
 end
 
 function rk_embedded_step!{N,S}(ytrial, yerr, ks, ytmp, y, fn, t, dt, dof, btab::TableauRKExplicit{N,S})
